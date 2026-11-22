@@ -1,0 +1,1980 @@
+# PROJECT GUIDE — Learn Every Part of the Snake Arena
+
+*This guide was written for you (the project owner) to read before describing,
+defending, or modifying the project. Everything here matches the real code in
+`src/snake_arena/` — every snippet was checked against the actual files.*
+
+---
+
+## Table of contents
+
+1. [What this project is (the 60-second version)](#1-what-this-project-is)
+2. [How it was built (the true story, in order)](#2-how-it-was-built)
+3. [Every technology used, and why](#3-every-technology-used)
+4. [The folder map (what lives where)](#4-the-folder-map)
+5. **The code, module by module** — the big section
+   - 5.1 [Shared game types](#51-game_game-typespy--the-vocabulary)
+   - 5.2 [The Snake entity](#52-gamesnakepy--the-snake-entity)
+   - 5.3 [Collision logic](#53-gamecollisionpy--collisions--flood-fill)
+   - 5.4 [Game state](#54-gamestatepy--the-world-state)
+   - 5.5 [The engine (the heart)](#55-gameenginepy--the-simulator)
+   - 5.6 [The food system](#56-gamefoodpy--the-food-system)
+   - 5.7 [Observations + RL environment](#57-gameenvironmentpy--observations--rl-environment)
+   - 5.8 [The agent contract](#58-agentsbasepy--the-agent-contract)
+   - 5.9 [Rule-based agent](#59-agentsrule_basedpy)
+   - 5.10 [BFS agent](#510-agentsbfspy--breadth-first-search)
+   - 5.11 [A* agent](#511-agentsastarpy--a-search)
+   - 5.12 [The DQN (deep RL)](#512-the-dqn--rl--deep-reinforcement-learning)
+   - 5.13 [The safety checker](#513-safetyvalidatorpy--the-safety-checker)
+   - 5.14 [The LLM layer](#514-the-llm-layer--llm)
+   - 5.15 [The Decision Manager](#515-agentsdecision_managerpy--the-brain-stem)
+   - 5.16 [The factory](#516-agentsfactorypy--the-factory)
+   - 5.17 [Evaluation & experiments](#517-evaluation--benchmarks-metrics-artifacts)
+   - 5.18 [Persistence](#518-persistence--safe-saving--history)
+   - 5.19 [Config system](#519-configpy--the-settings-system)
+   - 5.20 [The UI](#520-the-ui--pygame-screens)
+   - 5.21 [Entry points](#521-entry-points--mainpy--scripts)
+   - 5.22 [The bug-fix diary](#522-the-bug-fix-diary--true-stories-line-by-line) — real bugs fixed after launch, line by line
+   - 5.23 [The agents' algorithms, line by line](#523-the-agents-algorithms-line-by-line--your-viva-crib-sheet) — for your viva: what each agent's code does
+6. **Every command, explained** ([section 6](#6-every-command-explained))
+7. [The tests](#7-the-tests)
+8. [How to change things (recipes)](#8-how-to-change-things-recipes)
+9. [Glossary + questions you may be asked](#9-glossary--likely-questions)
+
+---
+
+# 1. What this project is
+
+**LLM-Enhanced Intelligent Snake Arena** — a Snake game where four kinds of AI
+play on the same board under the same rules, and you can compare them fairly:
+
+| Agent | How it thinks |
+|---|---|
+| **Rule-Based** | A scoring formula over the 4 possible moves (no search). |
+| **BFS** | Breadth-first search: shortest path to the nearest food. |
+| **A\*** | A\* search: optimal path + dead-end avoidance + value-aware food choice. |
+| **RL (DQN)** | A neural network trained with Deep Q-Learning (PyTorch). |
+| **LLM + A\* / LLM + RL** | A local LLM (Ollama, e.g. Qwen3) adds *strategy* on top. |
+| **Hybrid** | Combines DQN Q-values + A\* path quality + free space into one score. |
+
+The two big ideas that make this project special:
+
+1. **The safety checker.** No matter which agent proposes a move, an
+   independent validator checks it first (wall? reversal? own body? opponent?
+   dead-end?) and replaces it with a safe move if needed. The LLM can never
+   directly move the snake — it can only send *strategy hints*.
+2. **Honest evaluation.** All agents get the *same seeds* in benchmarks, so
+   score differences are skill differences. Untrained networks are labelled
+   "untrained". Missing LLM is labelled "fallback". Nothing is faked.
+
+---
+
+# 2. How it was built
+
+The true chronological order (useful when someone asks "how did you build
+this?"):
+
+1. **Environment first.** Created a Python virtual environment (`.venv/`),
+   installed PyTorch (CPU build), NumPy, pygame, matplotlib, pytest. Checked
+   that the machine has no Ollama — which shaped the design: *the game must
+   work fully without the LLM*.
+2. **The game engine** (`game/`): types → snake → collisions → state → engine
+   → food. This is the referee: it knows the rules and nothing about AI.
+3. **Pathfinding agents** (`agents/`): A\* and BFS written as real, generic
+   search functions that return paths, plus thin agent wrappers that turn a
+   path into a move. A rule-based baseline too.
+4. **RL** (`rl/` + `game/environment.py`): the 30-number observation, the
+   Q-network, replay buffer, reward function, trainer, checkpoints.
+5. **Safety layer** (`safety/validator.py`): written *after* the agents, on
+   purpose — it validates every agent through one pipeline.
+6. **LLM layer** (`llm/`): HTTP client with an injectable "transport"
+   function (so tests work with no network), strict JSON validation, the
+   prompt, the snapshot builder, the background worker thread, and the
+   deterministic fallback strategy.
+7. **Decision Manager** (`agents/decision_manager.py`): the pipeline that
+   glues view → safety → strategy → policy → safety again.
+8. **Evaluation** (`evaluation/`): benchmark runner with shared seeds,
+   metrics, JSON/CSV/PNG artifacts, tournaments.
+9. **Persistence** (`persistence/`): atomic saves, corrupt-file quarantine,
+   game history.
+10. **UI** (`ui/`): App shell + widgets + 7 screens, all drawn with pygame
+    (no image files — everything is drawn in code).
+11. **Tests** (`tests/`): 104 tests, written by verifying each module's real
+    API first. Writing them caught **real bugs** (a food-spawning bug, a
+    wrong `pygame.time.Clock` name, three UI import errors, a checkpoint
+    saved to the wrong folder, and — after release — four more, see §5.22) —
+    a good story about why tests matter.
+12. **Docs** (`docs/` + `README.md`), **support scripts** (Linux + Windows),
+    and final verification: `--check` was run, benchmarks produce real
+    artifacts, a genuine 40-episode training run produced `models/dqn_default.pt`.
+13. **Real play-testing found four more bugs after "done"** — a frozen
+    game-over screen, a dead UP-arrow, the test suite silently turning the
+    LLM off in the saved config, and a crash in the health-check script.
+    Each got a line-by-line walkthrough in §5.22 and a regression test, so
+    it can never come back unnoticed. This is the normal life of real
+    software: you ship, you play, you fix, you re-test.
+
+Two honest notes that are part of the build story:
+- The environment's pygame had to be replaced with **pygame-ce** (see §3).
+- **Windows** setup scripts were written but never executed (development
+  happened on Arch Linux) — the docs say this openly.
+
+---
+
+# 3. Every technology used
+
+| Technology | What it is | Why this project uses it |
+|---|---|---|
+| **Python 3.14** | The programming language | Ecosystem for AI; required by the spec. |
+| **venv** (`.venv/`) | Isolated Python environment | Keeps project dependencies separate from the system. |
+| **pygame-ce 2.5.8** | 2D game library (community edition of pygame; still `import pygame`) | Window, drawing, input, fonts, sound. **Why not classic pygame?** Classic pygame 2.6.1 has no ready-made package for Python 3.14; building it from source here produced a broken `font` module (a circular import bug). pygame-ce ships official wheels for new Python versions and is a drop-in replacement. |
+| **PyTorch 2.14 (CPU)** | Deep-learning framework | Builds and trains the DQN; runs on CPU by design (GPU optional). |
+| **NumPy** | Fast numeric arrays | The observation vector and replay buffer storage. |
+| **Matplotlib** | Plotting library | Training curves and benchmark charts (PNG). |
+| **pytest** | Testing framework | The 104 automated tests. |
+| **Ollama + Qwen3 4B** | Local LLM server + model (optional) | The strategic planner. Runs on your machine, no API key, no internet. |
+| **urllib** (Python stdlib) | HTTP client | Talks to Ollama — no extra dependency needed. |
+| **dataclasses** (stdlib) | Auto-generated data classes | Clean structs: `Snake`, `Food`, `EpisodeRecord`… |
+| **threading** (stdlib) | Background threads | The LLM worker and UI training/benchmark runners never block the game loop. |
+| **JSON / JSONL / CSV** | File formats | Config, benchmarks, history. All written *atomically*. |
+
+Key standard-library tools used and worth knowing for questions:
+`collections.deque` (snake body), `heapq` (A\* priority queue), `random.Random`
+(seeded reproducibility), `enum.IntEnum` (actions), `pathlib` (paths),
+`argparse` (CLI), `logging` (logs to console + `data/logs/app.log`).
+
+---
+
+# 4. The folder map
+
+```
+snake-game/
+├── main.py                  ← THE entry point (UI by default, --check/--train/--benchmark)
+├── requirements.txt         ← dependency list
+├── setup_linux.sh           ← one-time installer (Linux/macOS)
+├── run_linux.sh             ← launcher (Linux/macOS)
+├── setup_windows.ps1        ← PowerShell installer (Windows — written, not yet tested)
+├── run_windows.bat          ← ONE command for Windows: installs everything on
+│                               first run, then launches the game (see §6)
+├── config/
+│   ├── default.json         ← ALL settings (board, game, LLM, RL, benchmark…)
+│   └── foods.json           ← the 5 food types (value, %, lifetime, colour…)
+├── src/snake_arena/         ← the actual program
+│   ├── game/                engine, state, snake, collisions, food, RL environment
+│   ├── agents/              rule_based, bfs, astar, rl_agent, decision_manager, factory
+│   ├── safety/              validator.py — the safety checker
+│   ├── llm/                 ollama_client, strategist, schemas, analysis
+│   ├── rl/                  network, replay_buffer, rewards, trainer, checkpoints
+│   ├── evaluation/          benchmark, metrics, experiments (artifacts)
+│   ├── persistence/         storage (atomic IO), history (games.jsonl)
+│   ├── ui/                  app shell + 7 screens + widgets + theme + audio
+│   ├── config.py            AppConfig: load/validate/save/clamp settings
+│   └── utils/               paths.py (where files live), logging_setup.py
+├── scripts/                 headless CLIs: check_environment, train, benchmark
+├── tests/                   104 pytest tests (12 files)
+├── models/                  DQN checkpoints (models/dqn_default.pt)
+├── data/                    runtime output (created on first run)
+│   ├── benchmarks/<run-id>/ results.json, summary.csv, records.csv, charts
+│   ├── training/            training_curves.png
+│   ├── history/games.jsonl  every played game
+│   └── logs/app.log         rotating log
+└── docs/                    ARCHITECTURE, AI_ALGORITHMS, RL_TRAINING,
+                             EXPERIMENTS, WINDOWS_SETUP, REPORT, this guide
+```
+
+### 4.1 File-by-file index — "which file, what's inside"
+
+Open any file below and you will find exactly what the table says.
+`src/snake_arena/` is ~8 900 lines of Python in total.
+
+**The game core (`src/snake_arena/game/`)**
+
+| File | What you'll find inside |
+|---|---|
+| `types.py` | The shared vocabulary: `Action` (UP=0, DOWN=1, LEFT=2, RIGHT=3 — remember these numbers, they matter in §5.22), `Cell` (x, y), `Snake`, `Food`, `GameState`, `TurnResult`. |
+| `snake.py` | The `Snake` class: body as a `deque` (fast add/remove at both ends), `is_reversal()`, `commit_move()` with `pending_growth` (grows 1 segment per tick). |
+| `collision.py` | `check_collisions()` — decides who dies (wall / self / opponent / head-on → both die), tail-vacating rule; `flood_count()` — counts reachable cells (the dead-end detector). |
+| `state.py` | `GameState`: board size, snakes, food list, tick counter, helpers `cell_occupied()` / `occupied_cells(include_food=...)`. |
+| `engine.py` | `GameEngine.step(actions)` — the 8-step referee routine (AI actions → move → eat → grow → collisions → refill food → counters → winner). |
+| `food.py` | `FoodCatalog` (loads `config/foods.json`), `FoodManager` (weighted spawn/expire/refill), `FoodStats`. |
+| `environment.py` | The RL bridge: `StateView` (AI's eye on the world), `get_observation()` (the 30 floats, documented index by index), `SnakeEnvironment` (the RL training loop). |
+
+**The agents (`src/snake_arena/agents/`)**
+
+| File | What you'll find inside |
+|---|---|
+| `base.py` | The contract every agent signs: `BaseAgent.decide()` → `AgentDecision`; `StrategyHints` (the LLM's strategy parcel). |
+| `rule_based.py` | The baseline: scores all 4 moves with a formula (food direction, danger, free space). No search. |
+| `bfs.py` | BFS pathfinding + the `BfsAgent` wrapper that turns a path into a move. |
+| `astar.py` | A\* (heap + Manhattan heuristic + turn penalty) + `AstarAgent` with value-aware food targeting. |
+| `rl_agent.py` | `RLAgent`: observation → network → best action. Only *acts*, never trains here. Lower half: `HybridAgent` (mixes Q-values + A\* + free space with config weights). |
+| `decision_manager.py` | **The brain-stem**: one pipeline for all modes — view → safety `evaluate_all()` → strategy (LLM worker / fallback) → policy → `select_safe_action()`. Produces the `DecisionLog` shown in the AI panel. |
+| `factory.py` | The only file that *creates* agents: `resolve_checkpoint_path`, `build_rl_agent`, `build_llm_client`, `build_strategy_worker`, `build_decision_manager(mode)`. |
+
+**Safety + LLM + RL layers**
+
+| File | What you'll find inside |
+|---|---|
+| `safety/validator.py` | The independent safety checker: given an action, returns a `SafetyReport` (safe / rejected + reason); includes the dead-end flood-fill check. |
+| `llm/ollama_client.py` | The HTTP client for Ollama: `is_available()`, `has_model()`, `chat_json()`, injectable "transport" for tests. |
+| `llm/strategist.py` | The prompt (`SYSTEM_PROMPT`), `fallback_strategy()`, and `StrategyWorker` — a background thread that asks the LLM every few seconds and caches the latest hints. |
+| `llm/schemas.py` | Strict validation of the LLM's JSON answer (names, weights in 0–1, legal values) — bad answers are thrown away. |
+| `llm/analysis.py` | Builds the compact JSON snapshot of the board the LLM "sees". |
+| `rl/` (5 files) | `network.py` (30→128→128→4 MLP), `replay_buffer.py` (NumPy ring memory), `rewards.py` (each reward part separate), `trainer.py` (the training loop), `checkpoints.py` (save/load + honest metadata). |
+
+**Evaluation + persistence + UI**
+
+| File | What you'll find inside |
+|---|---|
+| `evaluation/benchmark.py` | Shared-seed benchmark + tournament; `AGENT_LABELS` (pretty names); honest `llm_available` flag; artifact writing. |
+| `evaluation/metrics.py` | Score/survival/efficiency calculators. |
+| `evaluation/experiments.py` | JSON/CSV/PNG artifact writers + the training-curves chart. |
+| `persistence/storage.py` | Atomic save/load (`.tmp` then rename), `.corrupt` quarantine, clamps bad values instead of crashing. |
+| `persistence/history.py` | Appends each played game to `data/history/games.jsonl`; aggregates for Statistics. |
+| `ui/app.py` | `App` shell: window, screen stack, main loop, shared services (audio, LLM client/worker, cached RL agent). |
+| `ui/components.py` | The widget kit: `Button`, `Slider`, `Toggle`, `Dropdown`, `TextInput`, `Label` (has `.set(text, color)`), `ProgressBar`, `BarChart`, `DataTable`, plus `send_event()` / `draw_widgets()`. |
+| `ui/theme.py` | `COLORS` palette, `Fonts` (built in code), `text()`, `panel()`, `hline()`, `wrap_text()`. |
+| `ui/arena.py` | The game screen: keyboard handling (arrows/WASD/Space/R/1/2/+/−/Esc), `_tick()` (human input + AI decide + `engine.step`), overlays, HUD, game-over flow (`over_at`, `over_widgets_shown`). |
+| `ui/settings.py` | 5 sections of settings widgets bound to the live config; Save/Restore; the **LLM status line** (§5.22, story 5). |
+| `ui/menu.py`, `results.py`, `training_dashboard.py`, `benchmark_dashboard.py`, `statistics.py` | The other screens (one file each). |
+| `ui/audio.py` | Generates tones with pygame's mixer — no sound files. |
+| `config.py` | ~490 lines: every `*Config` dataclass, `load_app_config()` with env-var overrides (see `.env.example`: `SNAKE_ARENA_DISABLE_LLM` etc.). |
+| `utils/paths.py` | Where files live: `default_config_path()` → `config/default.json`, `data_dir()`, `models_dir()`, `logs_dir()`. |
+
+---
+
+# 5. The code, module by module
+
+## 5.1 `game/types.py` — the vocabulary
+
+The smallest module but everything depends on it. It defines the shared
+language of the game, with **no imports from other game modules** (this
+prevents circular imports).
+
+```python
+Cell = tuple[int, int]          # a grid square, e.g. (12, 7)
+
+class Action(IntEnum):
+    UP = 0; DOWN = 1; LEFT = 2; RIGHT = 3
+
+DIR_VECTORS = {Action.UP: (0, -1), Action.DOWN: (0, 1),
+               Action.LEFT: (-1, 0), Action.RIGHT: (1, 0)}
+
+OPPOSITE = {Action.UP: Action.DOWN, ...}   # used for reversal checks
+```
+
+Helper functions you will see everywhere:
+- `manhattan(a, b)` — grid distance: `|dx| + |dy|`. It's the distance an A\*
+  heuristic uses, and the "how far is the food" measure.
+- `neighbors(cell)` — yields the 4 surrounding cells with the action that
+  reaches each.
+- `direction_from_cells(tail, head)` — infers which direction points from one
+  cell to an adjacent one. The snake uses it to know "which way am I facing"
+  **from geometry**, not from a stored variable — so it can never lie.
+
+> **Why tuples for cells?** They are immutable, hashable, and fast — required
+> for putting cells into `set`s (collision and pathfinding use sets heavily).
+
+## 5.2 `game/snake.py` — the snake entity
+
+```python
+@dataclass
+class Snake:
+    id: str
+    name: str
+    is_human: bool
+    body: deque[Cell]          # head is body[0], tail is body[-1]
+    direction: Action
+    alive: bool = True
+    score: int = 0
+    pending_growth: int = 0    # segments the snake still "owes" from eaten food
+    ...
+```
+
+**The single most important trick in the file** — gradual growth:
+
+```python
+def commit_move(self, new_head: Cell, growth_now: int = 0) -> None:
+    self.pending_growth += max(0, growth_now)
+    self.body.appendleft(new_head)          # new head goes to the front
+    if self.pending_growth > 0:
+        self.pending_growth -= 1            # keep the tail → grow by 1
+    else:
+        self.body.pop()                     # tail moves away → same length
+```
+
+When a snake eats a "special" food with `growth=2`, the 2 is *not* applied at
+once. The counter goes up, and the tail is retained for the next two ticks.
+This mirrors the classic game and matters for collision math: while
+`pending_growth > 0`, the tail will **not** vacate, so pathfinding must treat
+it as solid.
+
+Also important: `is_reversal(action)` — moving onto your own neck cell. The
+snake of length 1 has no neck, so it can go anywhere.
+
+> **Learn this word: `deque`** (pronounced "deck"). A double-ended queue:
+> adding/removing at either end is O(1). A snake body is the perfect use case:
+> new head at the front (`appendleft`), tail off the back (`pop`).
+
+## 5.3 `game/collision.py` — collisions & flood fill
+
+Pure logic shared by the engine, the safety validator, and all planners, so
+everyone agrees on the rules.
+
+**Tail-awareness** — the core idea:
+
+```python
+def will_tail_vacate(snake, growth_now=0) -> bool:
+    return snake.pending_growth == 0 and growth_now == 0
+```
+
+A tail cell is only a wall if it will still be there next tick. Planners use
+`planning_blocked_cells(state, snake_id)` which builds the set of walls: all
+bodies, minus tails that will vacate.
+
+**`is_deadly_for(state, snake, cell)`** answers "would moving here kill me
+right now?" and returns `"wall"`, `"self"`, `"opponent"`, or `None`. It is
+tail-aware in the same way.
+
+**`flood_fill_count(start, blocked, w, h, limit)`** — dead-end detection.
+From a candidate cell, it spreads to all connected free cells (like water
+flowing) and *counts* them:
+
+```python
+seen = {start}; frontier = [start]; count = 0
+while frontier and count < limit:
+    cell = frontier.pop(); count += 1
+    for each 4-neighbour not seen/blocked/in bounds:
+        seen.add(...); frontier.append(...)
+return count
+```
+
+If `count < snake.length`, that move enters a *pocket* the snake cannot
+survive. That one number powers the dead-end check everywhere.
+
+## 5.4 `game/state.py` — the world state
+
+A plain data container:
+
+```python
+@dataclass
+class GameState:
+    width, height
+    snakes: dict[str, Snake]
+    foods: list[Food]
+    tick: int
+    max_foods, moves_per_second, max_ticks
+    rng: random.Random          # THE single source of randomness
+    game_id: str
+```
+
+Note there is **no pygame here** — the state is pure data. That's what lets
+the same engine run the GUI, headless training, and benchmarks. Useful
+queries: `is_inside`, `food_at`, `occupied_cells(include_food=False)`,
+`living_snakes`, `opponents_of(id)`.
+
+## 5.5 `game/engine.py` — the simulator
+
+`GameEngine.step(actions: dict[str, Action])` advances the world by exactly
+one tick. Read it as an 8-step recipe:
+
+1. **Resolve intent.** Missing/invalid action → keep current direction.
+   A reversal attempt is *ignored* (event `reversal_ignored`) — the snake
+   keeps going forward. This enforces the no-U-turn rule at engine level,
+   for humans and AIs alike.
+2. **Wall deaths.** Any candidate head outside the board dies (`"wall"`).
+3. **Head-on deaths.** Two heads aiming at the *same cell*, or *swapping*
+   cells (A→B's cell and B→A's cell) → both die (`"head_on"` → a draw).
+4. **Body collisions, simultaneously.** For every survivor, compute its
+   `future_body` (new head inserted, tail popped if it vacates). Then:
+   your head in your own future body → `"self"`; your head in someone else's
+   future body → `"opponent"`. Because everyone's future is computed *before*
+   anyone dies, two snakes moving into each other's vacated tails both
+   survive — correct simultaneous resolution.
+5. **Commit movement + eating.** `commit_move(..., growth_now=food.growth)`,
+   add `food.value` to score, reset `steps_since_food`, record stats, emit
+   an `"eat"` (or `"trap"`) event.
+6. **Apply deaths** (mark `alive=False`, set `death_reason`, `death_tick`).
+7. **Food maintenance.** Expire old food, spawn replacements (`FoodSystem`).
+8. **End conditions.** If someone died: last snake standing wins
+   (`survivor_win`), nobody → `draw` (multi-snake) or `death` (solo). If
+   `tick >= max_ticks` → `timeout`, highest score wins (tie → `draw`).
+
+**Determinism:** all randomness flows through `self.rng = random.Random(seed)`.
+Same seed → same food spawns, same bounces, same everything. This is what
+makes fair benchmarks and stable tests possible.
+
+## 5.6 `game/food.py` — the food system
+
+Five types are **data, not code** — defined in `config/foods.json`:
+
+| type | value | chance | lifetime (s) | growth |
+|---|---|---|---|---|
+| normal | +10 | 55% | 25–45 | 1 |
+| bonus | +25 | 20% | 14–26 | 1 |
+| golden | +50 | 13% | 9–16 | 1 |
+| special | +100 | 7% | 6–11 | 2 |
+| trap | −20 | 5% | 18–30 | 0 |
+
+`FoodCatalog.load()` reads the JSON, **normalizes probabilities** (so they
+always sum to 1 even if you edit them badly), and falls back to built-in
+defaults if the file is missing/corrupt. `weighted_choice(rng)` spins the
+loaded probabilities.
+
+`FoodSystem.spawn_one` picks a uniformly random **genuinely free cell**
+(occupied = snakes **+ existing food** — this used to be a real bug where
+food could spawn on food; it was caught by a test) and skips silently if the
+board is full. `maintain()` each tick: remove expired food, refill up to
+`max_foods`.
+
+Each `Food` has `spawned_tick` and `lifetime_ticks`, so
+`remaining_ratio(tick)` goes 1.0 → 0.0 — the UI uses it to blink food that's
+about to disappear.
+
+## 5.7 `game/environment.py` — observations + RL environment
+
+Three things live here.
+
+**(a) `StateView`** — a per-tick "briefing pack" built once and shared:
+
+```python
+view = build_state_view(state, snake_id)
+view.me            # my Snake
+view.opponents     # other living snakes
+view.blocked       # tail-aware wall set (for planning)
+view.foods_sorted  # best food first: value / (1 + manhattan)
+view.target        # best positive food (or nearest if only traps remain)
+```
+
+**(b) `ObservationBuilder.build()`** — turns the world into **30 numbers**
+(the neural network's eyes). Layout (also documented in the file header):
+
+| indices | meaning |
+|---|---|
+| 0–2 | danger straight/left/right (wall, body, or opponent) |
+| 3–5 | free area after each of those moves, `min(1, area/length)` — dead-end sense |
+| 6–9 | current heading, one-hot |
+| 10–16 | target food: 4 direction signs, distance, |value|/100, is-trap |
+| 17–20 | 2nd-best food: 4 direction signs |
+| 21–27 | opponent: present?, head signs, distance, longer-than-me? |
+| 28 | my length / board area |
+| 29 | hunger: `steps_since_food / 150` |
+
+All values are ~0..1 (good for neural nets). The same builder is used in
+training *and* in games — they can never drift apart.
+
+**(c) `SnakeEnv`** — wraps the engine in a gym-style RL interface:
+
+```python
+env = SnakeEnv(width=20, height=15, max_foods=4, max_steps=1200, seed=...)
+obs = env.reset(seed)
+obs, events, terminated, truncated, info = env.step(action_int)
+```
+
+`terminated` = died (real end). `truncated` = hit the step cap (artificial
+end). The RL code treats these differently — that distinction matters in RL.
+
+## 5.8 `agents/base.py` — the agent contract
+
+Every agent implements one method:
+
+```python
+class BaseAgent(ABC):
+    @abstractmethod
+    def decide(self, state, snake_id, view=None, hints=None) -> AgentDecision: ...
+```
+
+`AgentDecision` is a **proposal**, never a command:
+
+```python
+@dataclass
+class AgentDecision:
+    agent: str
+    action: Action              # what I *want* to do
+    path: list[Cell]            # the planned route (UI draws this!)
+    target_food_id / target_pos # what I'm going for
+    q_values: dict | None       # RL: my four Q-values (UI shows bars)
+    notes: list[str]            # human-readable reasons
+    diagnostics: dict           # agent-specific extras
+    computation_ms: float       # how long I thought
+```
+
+`StrategyHints` is the LLM's *only* output channel:
+
+```python
+@dataclass
+class StrategyHints:
+    strategy: str = "balanced"   # defensive|balanced|aggressive|greedy|survival
+    food_priority: float = 0.5   # 0..1
+    survival_priority: float = 0.5
+    risk_tolerance: float = 0.5
+    target_food_id: str | None = None
+    source: str = "default"      # default | llm | fallback
+```
+
+Notice: **no `Action` anywhere in the hints.** The LLM literally cannot say
+"move right". That is the design decision the whole safety story hangs on.
+
+## 5.9 `agents/rule_based.py`
+
+The "classical AI baseline". For each of the 4 actions it computes a utility:
+
+```
+U(a) = 2.0 * progress(a)              # do I get closer to the best food?
+     + 0.5 * min(1, free_area(a)/8)   # do I keep breathing room?
+     - 3.0 * trap(a)                  # is this (or near) a trap food?
+     - 1.5 * contested(a)             # can the opponent reach this cell next tick?
+```
+
+Deadly moves get −1,000,000 up front. Highest utility wins. No search at all
+— one pass over 4 actions → ~0.1 ms. It survives long because it values
+space and avoids traps, but it doesn't plan, so it's inefficient.
+
+## 5.10 `agents/bfs.py` — breadth-first search
+
+`bfs_search(start, goal, width, height, blocked)` is a textbook BFS:
+
+```python
+queue = deque([start]); parent = {start: start}; visited = {start}
+while queue:
+    current = queue.popleft()              # FIFO = waves of distance
+    for each neighbour:
+        if blocked/visited/out: continue
+        visited.add; parent[nxt] = current
+        if nxt == goal: rebuild path via parent links; return
+```
+
+BFS explores in "waves" of increasing distance, so the first time it reaches
+the goal, the path is a **shortest path** (fewest steps) — on a grid where
+every step costs 1. Cost: visits many cells; no notion of "better" food.
+
+The **BFS agent** targets the *nearest non-trap food*, deliberately ignoring
+food values — it's the control group that shows what value-aware targeting
+(A\* agent) is worth. Both agents also flood-fill-check that the destination
+pocket is survivable, with a tail-chase fallback when no food is reachable.
+
+## 5.11 `agents/astar.py` — A\* search
+
+A\* = Dijkstra + a hint. It keeps a **priority queue** ordered by
+
+```
+f(n) = g(n) + h(n)      g = cost paid so far, h = estimated cost to goal
+```
+
+`h` here is Manhattan distance, which is *admissible* (never overestimates on
+a 4-connected grid) — that guarantees the found path is optimal, and *A\*
+expands far fewer cells than BFS* because it leans toward the goal. Extra
+features:
+
+- **turn penalty (0.02):** changing direction costs a tiny bit → smoother,
+  nicer-looking paths without changing their length.
+- **survivability check** (`route_is_survivable`): flood-fill from the path's
+  end; if the pocket is smaller than the snake, skip that food (it's bait).
+- **food scoring:** candidates are ranked by a documented utility:
+
+```
+U(f) = w_p * value/(1+dist)/10  -  w_r * risk(f)  -  0.3 if it expires before arrival
+w_p = 0.35 + 1.3 * food_priority        (from the LLM hints!)
+w_r = 0.6 * (1 - risk_tolerance)        (from the LLM hints!)
+```
+
+- **survival fallback:** chase own vacating tail — the classic safe loop.
+- Re-plans **every tick** (cheap at these board sizes), so paths are never stale.
+
+## 5.12 The DQN — `rl/` — deep reinforcement learning
+
+**The idea in one paragraph.** Q-learning learns a "quality" number Q(s, a)
+— "if the world looks like `s` and I do `a`, how good is my future?" — by
+trial and error. A DQN approximates Q with a neural network. After every
+step we store the experience and, occasionally, nudge the network so that
+
+```
+Q(s,a)  →  closer to  reward + γ · max_a' Q(s', a')     (γ = 0.9 = value of the future)
+```
+
+**`rl/network.py`** — the network is a small MLP:
+
+```python
+obs(30) → Linear(128) + ReLU → Linear(128) + ReLU → Linear(4)   # one Q per action
+```
+
+Small on purpose: 30 inputs is tiny; 128×128 trains fine on a CPU.
+`pick_device()` uses CUDA/MPS only if genuinely present.
+
+**`rl/replay_buffer.py`** — a fixed-capacity **ring buffer** of experiences
+`(obs, action, reward, next_obs, done)` stored as preallocated NumPy arrays.
+`pos` wraps around (`(pos+1) % capacity`) → old memories are overwritten.
+Sampling a random batch of 64 breaks the correlation between consecutive
+steps — a key trick that stabilizes DQN training.
+
+**`rl/rewards.py`** — the reward signal:
+
+| event | reward |
+|---|---|
+| eat food | `0.1 × value` → +1 … +10 |
+| trap | −2 |
+| death (wall/self/opponent) | −10 |
+| move closer/farther to target food | ±`0.12 × Δdistance` (shaping) |
+| 120+ steps without eating | small growing penalty |
+| step cost | 0 |
+
+The shaping term is *potential-based* (it depends only on distance change),
+which speeds learning without changing which behaviour is optimal. Deaths
+(−10) dominate any accumulated shaping (≤ ~1/episode), so the agent cannot
+"win" by hiding forever — it must eat.
+
+**`rl/trainer.py`** — the learning loop:
+
+- `epsilon()` — exploration schedule: with probability ε take a random
+  action; ε decays **1.0 → 0.05 over 25 000 steps** (first: pure random
+  exploration; later: trust the net).
+- `learn()` — one gradient step:
+  ```python
+  q_sa = online(obs).gather(1, actions)                     # predicted value
+  with torch.no_grad():                                     # target is fixed
+      best = online(next_obs).argmax(...)                   # Double DQN:
+      q_next = target(next_obs).gather(1, best)             #   online PICKS, target VALUES
+  q_target = rewards + gamma * (1 - dones) * q_next         # dones cut the future
+  loss = SmoothL1Loss(q_sa, q_target)                       # Huber = robust to outliers
+  optimizer.zero_grad(); loss.backward()
+  clip_grad_norm_(online.parameters(), 10.0)                # stability
+  optimizer.step()
+  ```
+  **Two networks** fight instability: `online` learns each step; `target` is
+  a frozen copy refreshed every 1000 steps that provides the "goal" values.
+  **Double DQN** (config `double_dqn: true`) decouples *choosing* the best
+  next action (online net) from *valuing* it (target net) — a standard fix
+  for DQN overestimating values.
+- `run_episode(env, greedy, seed, ...)` — play one full episode, optionally
+  learn each step; `evaluate(env_factory, episodes, seed_base)` plays greedy
+  with fixed seeds → **deterministic, reproducible numbers**.
+- `save()/load()` — full checkpoints (see below); `training_worker()` is the
+  loop used by both the CLI and the UI dashboard, with pause/stop flags and
+  autosave every 50 episodes.
+
+**`rl/checkpoints.py`** — a checkpoint is a dict saved with
+`torch.save` **atomically** (write `.tmp` → `rename`): weights of both
+networks, optimizer state, hyperparameters, full training history, and the
+honest labels `episodes` / `trained`. `describe_checkpoint()` turns that
+into `"trained (440 episodes, best score 190)"` or `"untrained"` — this exact
+string appears in logs and UI, so an untrained model can never pass as smart.
+
+## 5.13 `safety/validator.py` — the safety checker
+
+Independent of every agent. `check(state, snake_id, action)` returns a
+`SafetyReport(action, safe, reason, free_area)` and rejects:
+
+| reason | meaning |
+|---|---|
+| `wall` | next cell outside the board |
+| `reversal` | 180° turn into the neck |
+| `self_collision` | next cell in own body (tail-aware, strict mode) |
+| `opponent_collision` | next cell in an opponent's body |
+| `dead_end` | flood-fill area after the move < snake length |
+
+The arbiter — the method every mode's action passes through:
+
+```python
+def select_safe_action(self, state, snake_id, preferred, fallback_order=..., target=None):
+    reports = self.evaluate_all(state, snake_id, view)
+    if reports[preferred].safe:
+        return preferred, preferred_report            # 1. wish granted
+    rejected.append(...)
+    candidates = [a for a in fallback_order if a != preferred and reports[a].safe]
+    if candidates:
+        best = min(candidates, key=lambda a: (-free_area, distance_to_target))
+        return best, SafetyReport(best, True, None, ..., rejected)   # 2. overridden
+    return preferred, SafetyReport(preferred, False, "no_safe_action", 0, rejected)
+```
+
+Rule 3 matters for honesty: if the snake is truly trapped, we don't fake a
+magic escape — we return the move flagged `no_safe_action` and the record
+shows the truth. Every intervention is counted
+(`manager.stats["safety_interventions"]`, `snake.rejected_moves`) and can be
+drawn on the board.
+
+## 5.14 The LLM layer — `llm/`
+
+**`ollama_client.py`** — a minimal HTTP client using only `urllib`
+(no `requests` dependency). Three endpoints matter: `GET /api/tags` (is the
+server up? which models exist?), `POST /api/chat` (talk to the model). Key
+design points:
+
+- **Injectable transport.** The HTTP call is a callable
+  `transport(path, payload, timeout) -> (status, body)`. Tests inject a fake
+  — the whole LLM stack is tested offline because of this one seam.
+  ```python
+  Transport = Callable[[str, bytes | None, float], tuple[int, bytes]]
+  ```
+- **JSON mode**: the request includes `"format": "json"` and
+  `"think": False` (Qwen3's thinking mode off for speed).
+- `chat_raw` retries (≤ `max_retries`) on transport errors *and* malformed
+  replies, then raises typed exceptions: `OllamaUnavailable`, `OllamaTimeout`,
+  `OllamaBadResponse`. Callers always degrade gracefully — never crash.
+
+**`schemas.py`** — strict validation of what the model said:
+
+```python
+def parse_strategy(obj) -> Strategy:      # raises StrategyValidationError on ANY violation
+    strategy must be one of 5 names
+    food_priority / survival_priority / risk_tolerance must be numbers in [0,1]
+    target_food_id must be null or a string
+    reason must be a string (trimmed to 300 chars)
+```
+
+`extract_json_object(text)` handles Qwen3's `<think>...</think>` blocks and
+stray chatter by finding the first balanced `{...}` and parsing that.
+Rejection (not silent fixing) is the policy — a bad reply falls back.
+
+**`strategist.py`** — the planner itself:
+
+- `SYSTEM_PROMPT` tells the model: *"You do NOT control movement directly…
+  Respond with ONLY a JSON object"*, and defines the schema + when to prefer
+  each strategy.
+- `build_snapshot(state, snake_id, view, safe_routes)` — a compact JSON: top-6
+  foods (id, type, value, risk, distance, remaining lifetime, contested?),
+  own score/length/hunger, nearest opponent + a danger level. Compact = fast
+  and cheap for a 4B model.
+- `snapshot_hash` — SHA-1 of canonical JSON → identical situations reuse the
+  cached answer.
+- `fallback_strategy(snapshot)` — the deterministic stand-in:
+  high danger → defensive; valuable food within 7 → greedy; hungry → greedy;
+  else balanced. This makes LLM-mode behaviour **fully testable offline**.
+- `StrategyWorker` — a **daemon thread** with a `threading.Condition`:
+  `submit(snapshot)` replaces any pending snapshot (only the latest matters);
+  the loop calls the LLM at most once per `min_interval` seconds (3 s), stores
+  the newest `StrategyResult`, and never touches pygame. The game loop only
+  *peeks* at the latest result — if empty, it uses fallback and moves on. A
+  hung LLM can freeze this thread, never the game.
+
+**`analysis.py`** — after a game, optionally asks the model for a narrative
+about the match; stored **clearly marked as model-generated**. Without an
+LLM, a deterministic summary is stored instead.
+
+## 5.15 `agents/decision_manager.py` — the brain-stem
+
+One class drives all 7 modes through the same pipeline:
+
+```python
+def decide(self, state, snake_id) -> Action:
+    view         = build_state_view(state, snake_id)          # 1. observe
+    reports      = validator.evaluate_all(...)                # 2. safety pre-check (all 4 moves)
+    hints        = self._hints(...)                           # 3. strategy: worker | sync | fallback
+    proposed     = self._policy(...)                          # 4. policy vote
+    final, report = validator.select_safe_action(             # 5. safety arbitration
+                        ..., proposed.action, fallback_rank, ...)
+    ...                                                        # 6. log everything
+    return final
+```
+
+Mode dispatch (in `_policy`):
+
+```python
+"rule_based"            -> rule_agent
+"astar" / "llm_astar"   -> astar_agent
+"bfs"                   -> bfs_agent
+"rl"   / "llm_rl"       -> rl_agent, then _gate_rl (risk gating)
+"hybrid"                -> _hybrid (weighted fusion)
+```
+
+**RL risk gating** (`_gate_rl`) — how hints tame the network: walk the
+Q-value ranking and take the first action whose free area is at least
+
+```
+min_area = length × (0.8 + 0.9·survival_priority) × (1 − 0.5·risk_tolerance)
+                                                              (×0.7 if aggressive)
+```
+
+so a "survival" strategy makes the RL agent needier about open space, and
+"aggressive" relaxes it. Every activation is counted (`gating_activations`).
+
+**Hybrid scoring** (`_hybrid`) — combines three signals on each *safe* action:
+
+```
+score(a) = w_rl · Q_normalized(a) + w_path · path_quality(a) + w_space · free_area(a)
+```
+
+Weights come from config (`decision.hybrid`) and are re-weighted by the
+strategy (`food_priority` boosts path, `survival_priority` boosts space),
+then normalized to sum to 1. Q-values are min-max normalized first — you
+can't average raw volts with metres.
+
+Everything is recorded per tick in a `DecisionLog` (proposed vs final,
+reasons, strategy source, Q-values, notes, timings) kept in a 60-entry deque
+that the arena screen renders live.
+
+## 5.16 `agents/factory.py` — the factory
+
+The one place that knows how to *build* things:
+
+- `resolve_checkpoint_path(config, name)` — absolute stays; `models/x.pt`
+  resolves from the project root; a bare `x.pt` resolves into `models/`.
+  (This function had a real bug — bare names landed in the project root —
+  found and fixed during end-to-end testing.)
+- `build_rl_agent(config)` — loads the checkpoint if present and valid;
+  otherwise returns an honest **untrained** agent (random init + safety net).
+- `build_llm_client` / `build_strategy_worker` / `build_manager` — wiring;
+  passing neither worker nor client gives a guaranteed-offline manager.
+
+## 5.17 Evaluation — benchmarks, metrics, artifacts
+
+**`evaluation/benchmark.py`** — `BenchmarkRunner`:
+
+- solo episodes: `seed = base_seed + episode_index` for **every agent** →
+  agent A's episode 3 and agent B's episode 3 are the *same board*. That is
+  the entire fairness mechanism, and there's a test that proves it.
+- LLM agents (`llm_astar`, `llm_rl`) play fewer episodes by default
+  (LLM calls are expensive) and each record carries
+  `llm_available = (llm_calls > 0 and llm_failures == 0)`; the run header
+  records a live probe of Ollama.
+- `run_match(a, b, seed)` — symmetric duel; `run_tournament(...)` —
+  round-robin with wins/draws/win-rate.
+
+**`evaluation/metrics.py`** — `EpisodeRecord` (agent, seed, score, steps,
+length, outcome, death reason, foods, safety interventions, decision ms, LLM
+stats) and `summarize(records)` → mean/median/std/min/max, survival rate,
+traps per 1k ticks, death reasons.
+
+**`evaluation/experiments.py`** — `make_run_dir(prefix)` (timestamped folder
+under `data/benchmarks/`), `save_benchmark_results` (results.json +
+summary.csv + records.csv), `plot_benchmark_charts` (3 PNGs),
+`load_run`, `plot_training_curves`. Every number in every artifact comes
+from a real run — the code path that writes them is the same one that plays
+the games.
+
+## 5.18 Persistence — safe saving & history
+
+**`persistence/storage.py`** — the atomic-IO toolbox:
+
+```python
+def save_json_atomic(path, obj):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ...))
+    tmp.replace(path)            # rename is atomic on POSIX & Windows
+```
+
+A crash mid-write can never destroy the last good file. `load_json`
+quarantines unreadable files as `*.corrupt` and returns the default.
+`read_jsonl` skips damaged lines instead of failing the whole history.
+
+**`persistence/history.py`** — every played game is appended to
+`data/history/games.jsonl` via `build_game_record(...)` + `record_game(...)`.
+`aggregate()` computes per-agent games/mean/max and the top game — that's
+what the Statistics screen shows. `clear_history()` deletes it.
+
+## 5.19 `config.py` — the settings system
+
+`AppConfig` is a dataclass tree with 12 sections (`board`, `game`, `window`,
+`audio`, `visual`, `agent`, `llm`, `rl`, `safety`, `decision`, `benchmark`,
+`training`). Behaviours to remember:
+
+- `validate()` **clamps** bad values into legal ranges (e.g. board size
+  10–40) instead of crashing.
+- `save()` is atomic; `load_app_config()` recovers from a corrupt file by
+  quarantining it and returning defaults; partial JSON merges into defaults
+  (missing keys keep defaults); env overrides:
+  `SNAKE_ARENA_DISABLE_LLM`, `OLLAMA_HOST`, `OLLAMA_MODEL`.
+- Default: **`llm.enabled = false`** — the game never requires the LLM.
+
+## 5.20 The UI — pygame screens
+
+**`ui/app.py`** — the shell. `App` owns the window, fonts, audio, and a
+**screen stack**:
+
+```python
+app.push_screen(ArenaScreen(...))   # go deeper (menu → arena → results)
+app.pop_screen()                    # back
+app.replace_screen(MenuScreen(app)) # switch (with "Back to menu")
+```
+
+The main loop runs at up to 60 fps: pump events → `active_screen.update(dt)`
+→ `draw(surface)` → `flip()`. Screens are only ever touched on the main
+thread; LLM and training run on their own threads (see §5.14, §5.12).
+`App` also caches shared services: `llm_client()`, `llm_worker()`,
+`rl_agent()` — so the checkpoint loads once, the worker thread exists once.
+
+**`ui/theme.py`** — a colour palette (`COLORS`), font management (`Fonts`),
+and tiny helpers (`text()`, `panel()`, `hline()`, `wrap_text()`).
+
+**`ui/components.py`** — a small widget kit written from scratch:
+`Button`, `Slider`, `Toggle`, `Dropdown`, `TextInput`, `ProgressBar`,
+`DataTable`, `BarChart`, plus `draw_widgets(surface, widgets, fonts)` and
+`send_event(widgets, event)`. Every widget owns a `pygame.Rect` and
+`handle_event` does hit-testing with `rect.collidepoint(pos)`.
+
+**The 7 screens** (`ui/menu.py`, `arena.py`, `results.py`,
+`training_dashboard.py`, `benchmark_dashboard.py`, `settings.py`,
+`statistics.py`):
+
+- **MenuScreen / ModeSelectScreen** — title, mode pick (human vs AI, AI vs
+  AI), agent dropdowns, speed slider, seed, "Environment check" status.
+- **ArenaScreen** — the game. Grid, snakes (rounded segments), food shapes
+  per type with expiry blink, HUD (scores, timer), overlays you can toggle:
+  A\* path, danger cells, target, rejected moves, Q-value buttons; the
+  diagnostics panel shows the latest `DecisionLog` (strategy source,
+  interventions, notes). Human input: arrows/WASD, Space pause, R restart.
+  The game-over flow (delayed button reveal, why `draw()` must never rebuild
+  widgets) is told line by line in §5.22 story 1.
+- **ResultsScreen** — end-of-game table (scores, lengths, foods by type,
+  deaths), safety/LLM summary, Rematch / Menu.
+- **TrainingDashboard** — start/pause/stop training in a background thread;
+  live episode/score/loss/epsilon chart (`BarChart`), eval results, autosave
+  status, checkpoint name input.
+- **BenchmarkDashboard** — pick agents + episode counts, run in a thread
+  with a progress bar and Cancel; results table; load previous runs;
+  tournament mode; a gold banner when LLM results are fallback-only.
+- **SettingsScreen** — every config section as widgets, bound live to
+  `app.config`; Save (validate + atomic save) / Restore Saved / Back.
+  The LLM Planner section ends with a **live status line** that probes
+  Ollama in a background thread (§5.22, story 5) — green "connected",
+  red "not reachable" + the exact commands to fix it.
+- **StatisticsScreen** — history aggregates + the last 30 games table,
+  Clear History.
+
+**`ui/audio.py`** — small generated tones (no sound files); safely no-ops
+when audio is unavailable.
+
+> Everything visual is drawn with `pygame.draw` — **zero image/font asset
+> files**, which is why the project runs from a clean clone with no asset
+> downloads.
+
+## 5.21 Entry points — `main.py` & `scripts`
+
+`main.py` = argument parsing + logging setup + dispatch:
+
+| flag | does |
+|---|---|
+| *(none)* | open the graphical app |
+| `--check` | `scripts/check_environment.py` → verify everything, exit 0/1 |
+| `--train N` | `scripts/train.py` → N episodes of DQN training |
+| `--benchmark N` | `scripts/benchmark.py` → headless benchmark |
+| `--agents a,b` | restrict benchmark agents (comma-separated) |
+| `--no-llm` | force `config.llm.enabled = False` for this run |
+| `--config PATH` | use an alternative config JSON |
+| `-v` | debug logging |
+| `--version` | print version |
+
+It also inserts `src/` into `sys.path` so a plain
+`python main.py` works without installing the package.
+
+## 5.22 The bug-fix diary — true stories, line by line
+
+These four bugs + one feature were all found by **real play-testing** after
+the project was "finished". Each story follows the same shape: **what you
+saw → the concept you need → the code, line by line, in the order it runs →
+the proof**. Read them in order — story 3 and 4 connect to each other.
+
+### Story 1 — "The game is stuck when it ends" (the frozen game-over screen)
+
+**What you (the player) saw:** the game finishes, the "Game over" banner
+appears… and nothing responds. Clicks do nothing. The only way out was
+closing the window.
+
+**Concept first — how a click actually works.** A mouse click is really
+**two events**: `MOUSEBUTTONDOWN` (you press) and `MOUSEBUTTONUP` (you
+release). A `Button` widget becomes "pressed" on DOWN and fires its action
+on UP *only if the press and release both happened on it*. Between the two
+events, frames pass — the game keeps drawing.
+
+**The flow that broke.** Every frame the game does: `update(dt)` →
+`draw(surface)` → next frame. The old code had, inside `draw()`:
+
+```python
+def draw(self, surface):
+    ...
+    self.layout()   # ← the bug: rebuild the widget list EVERY frame
+```
+
+`layout()` starts with `self.widgets = []` and rebuilds every button/slider
+as **brand-new objects**. So:
+
+1. You press the mouse on a button → `handle_event` marks **that object's**
+   `pressed = True`. At this moment the object under the mouse is the OLD
+   button object.
+2. Next frames call `draw()` → `layout()` throws away the old objects and
+   makes new ones.
+3. You release → `MOUSEBUTTONUP` arrives, is given to the NEW object —
+   which was never pressed, so it ignores it. The click is lost.
+
+The fix has three parts, in `ui/arena.py`:
+
+```python
+def on_enter(self) -> None:
+    self.layout()               # lay out once, when the screen opens
+```
+
+```python
+# in _build_game(): the reset block
+self.over_at = None
+self.over_widgets_shown = False
+```
+
+```python
+def update(self, dt: float) -> None:
+    if self.state_name == "over":
+        # Reveal the end-of-game buttons once, shortly after the banner.
+        if (not self.over_widgets_shown and self.over_at is not None
+                and time.time() - self.over_at > 0.9):
+            self.over_widgets_shown = True
+            self.layout()
+        return
+    ...
+```
+
+Line by line:
+- `over_at` — the exact time the game ended (a timestamp, set when the
+  engine reports `done`). We store it so we can wait a moment.
+- `over_widgets_shown` — a flag ("bool"), starts `False`. "Have we already
+  built the end-of-game buttons?"
+- In `update()`: when the state is `"over"`, if the flag is still `False`
+  AND more than 0.9 s passed since the banner, set the flag `True` and call
+  `layout()` **once**. From then on, the same button objects stay in
+  `self.widgets`, so a click's DOWN→UP pair lands on the *same* object —
+  a click can never be lost again.
+- `draw()` no longer calls `layout()` — it only *draws* whatever exists.
+
+**The proof (regression test).** `tests/test_ui_headless.py::test_arena_game_over_buttons_survive_clicks`
+forces the over-state, lets the 0.9 s pass, then sends a real
+DOWN → frames → UP click pair and asserts the click works even though
+frames passed in between. When re-applied to the old code, this test
+**fails**; with the fix it passes. That is how you know the fix is real.
+
+### Story 2 — "UP arrow doesn't work" (the invisible zero)
+
+**What you saw:** DOWN, LEFT, RIGHT all worked; UP did nothing.
+
+**Concept first — "truthy" and "falsy".** In Python, `if x or default`
+means "x if x is truthy, else default". Most values are truthy — but the
+number **0 is falsy** (counts as "nothing"). Our actions are an `IntEnum`:
+
+```python
+class Action(IntEnum):
+    UP = 0      # ← zero!
+    DOWN = 1
+    LEFT = 2
+    RIGHT = 3
+```
+
+The old `_tick()` had:
+
+```python
+action = self.pending_human_action or human.direction   # ← the bug
+```
+
+The OLD line (kept for honesty — this was the bug) uses `or`: when you
+press UP, `pending_human_action` is `Action.UP`, which **equals 0**, and
+0 is "falsy" — Python treats it like "nothing", so Python picks the second
+choice: `human.direction` (keep going straight). UP presses were silently
+discarded. DOWN=1, LEFT=2, RIGHT=3 are all truthy, so those worked —
+that's why *only UP was dead*.
+
+The fix, in `_tick()`:
+
+```python
+# NB: `Action.UP == 0` is falsy -- must compare with None explicitly.
+action = self.pending_human_action if self.pending_human_action is not None else human.direction
+```
+
+Line by line: "if `pending_human_action` **is not None** → use it; else
+use the current direction." `None` is Python's real "nothing". `Action.UP`
+is 0, and 0 **is not None** — True → your UP press is used. One line, bug
+dead.
+
+**The proof.** New regression test `test_human_up_arrow_turns_the_snake`:
+press UP→LEFT→DOWN→RIGHT in sequence (each turn is a 90° turn, so no press
+is a "reversal" — the engine ignores reversals on purpose: a snake can't
+fold into its own neck). All four turns must change the snake's heading;
+the test passes with the fix and fails on the old `or` code.
+
+### Story 3 — "The LLM kept turning itself off" (tests overwriting your config)
+
+**What you saw:** "errors in settings", and the LLM planner was mysteriously
+off; you couldn't figure out how to use the LLM.
+
+**Concept first — tests share your computer with you.** Tests are code too.
+If a test presses the Settings screen's **Save** button, the game writes
+`config/default.json` — *your real settings file* — with whatever the test
+had set. Our test fixture (a fixture is code that prepares a shared test
+environment) sets `cfg.llm.enabled = False` so tests never touch the
+network. Now connect the dots:
+
+- test presses Save → writes `llm.enabled: false` into **your** real
+  config file.
+- You launch the game → reads the file → LLM off. Every test run re-broke
+  it. That was the "errors in settings".
+
+The fix, in `tests/test_ui_headless.py`:
+
+```python
+def test_settings_roundtrip_through_widgets(app, monkeypatch, tmp_path):
+```
+
+Two pytest freebies:
+- `tmp_path` — a pytest-built **empty temp folder** for this one test.
+- `monkeypatch` — a pytest tool to temporarily replace something in code,
+  auto-restored after the test.
+
+```python
+monkeypatch.setattr(paths, "default_config_path", lambda: tmp_path / "default.json")
+```
+
+Line by line: "inside `snake_arena.utils.paths`, temporarily replace the
+function `default_config_path` with a lambda that returns a file inside the
+temp folder." `AppConfig.save()` calls `paths.default_config_path()` when
+no path is given — so the test's Save now writes **there**, not to your
+real config. Auto-restored afterwards.
+
+**The proof.** The test now asserts `(tmp_path / "default.json").exists()`
+— the file landed in the temp folder, not in `config/`. Your real config
+stays yours. (And we restored `llm.enabled: true` in the real config.)
+
+### Story 4 — the health-check crash bug (wrong argument)
+
+**What you saw:** nothing — it was a **hidden bug**, found by reading, not
+by crash. `scripts/check_environment.py` had:
+
+```python
+client = OllamaClient(config.llm)          # ← the bug
+```
+
+But look at the constructor:
+
+```python
+class OllamaClient:
+    def __init__(self, host: str = "http://127.0.0.1:11434", model: str = "qwen3:4b", ...):
+        self.host = host.rstrip("/")
+```
+
+The first parameter is `host: str` — a **string**. We passed a whole
+`LLMConfig` *object*. Result: later `host.rstrip("/")` → **AttributeError
+crash**. It never crashed in practice only because the config file had
+(accidentally, via story 3) LLM disabled — the buggy line never ran! One
+silent bug was hiding another. Fix — pass the fields properly:
+
+```python
+client = OllamaClient(
+    host=config.llm.host,
+    model=config.llm.model,
+    timeout=config.llm.timeout_seconds,
+    connect_timeout=config.llm.connection_timeout_seconds,
+    max_retries=config.llm.max_retries,
+)
+```
+
+**The proof.** With LLM enabled, `--check` now prints
+`[OK] Ollama - not reachable (...) - expected if not installed` and exits
+**ALL CHECKS PASSED** — no crash.
+
+### Story 5 (a feature, not a bug) — the LLM status line in Settings
+
+**Why:** before, if Ollama wasn't running, you only learned about it from
+fallback messages *inside a game*. Now the Settings screen tells the truth
+right where you configure it. File: `ui/settings.py`. Four pieces, in the
+order they run.
+
+**(a) The import (top of file):**
+
+```python
+import threading
+```
+
+*Meaning:* `threading` lets us run a small job "in the background" so the
+window never freezes while we wait for Ollama to answer.
+
+**(b) Remembering state — added to `__init__`:**
+
+```python
+self._llm_status_label: Label | None = None   # the widget showing the verdict
+self._llm_probe_key: tuple | None = None      # which settings we already probed
+self._llm_status: tuple[str, str] | None = None  # (text, color) of last result
+```
+
+Line by line:
+- `_llm_status_label` — the on-screen `Label` widget. `None` until the LLM
+  Planner section is built.
+- `_llm_probe_key` — a memory of *which* (enabled, host, model) we already
+  checked, so we don't re-check the same thing again and again.
+- `_llm_status` — the last verdict, saved so a screen redraw can show it
+  without checking again.
+
+**(c) The prober — `_probe_llm()`, called whenever the LLM Planner section
+is built, and after Save:**
+
+```python
+def _probe_llm(self) -> None:
+    label = self._llm_status_label
+    if label is None:
+        return
+```
+
+Line by line: grab the label; if we're not on the LLM section (label never
+built), do nothing.
+
+```python
+    cfg = self.app.config.llm
+    key = (cfg.enabled, cfg.host, cfg.model)
+    if key == self._llm_probe_key:
+        if self._llm_status:
+            label.set(*self._llm_status)
+        return
+    self._llm_probe_key = key
+    self._llm_status = None
+```
+
+Line by line:
+- Build a `key` — a tuple of the three settings that matter. Same key =
+  same question, no need to ask again.
+- If we already asked this exact question: show the stored verdict
+  (`label.set(*self._llm_status)` — the `*` unpacks the tuple into
+  `set(text, color)`) and stop.
+- Otherwise remember the key and clear the old verdict.
+
+```python
+    if not cfg.enabled:
+        status = ("LLM planner is off -- the game plays fine without it.", COLORS.text_dim)
+        self._llm_status = status
+        label.set(*status)
+        return
+```
+
+If LLM is switched off: show a calm grey message and stop. No network call
+at all.
+
+```python
+    label.set("checking Ollama ...", COLORS.text_dim)
+```
+
+Show "checking…" immediately, so the user sees something *before* the
+answer arrives.
+
+```python
+    def work():
+        from ..agents.factory import build_llm_client
+
+        client = build_llm_client(self.app.config)
+        if client is None:
+            status = ("LLM planner is off -- the game plays fine without it.", COLORS.text_dim)
+        else:
+            ok, detail = client.is_available()
+            if not ok:
+                status = (
+                    f"Ollama not reachable at {cfg.host} -- install ollama, run 'ollama serve'"
+                    f" and 'ollama pull {cfg.model}'  ({detail[:44]})",
+                    COLORS.danger)
+            elif (has_model := client.has_model())[0]:
+                status = (f"Ollama connected -- model {has_model[1]} ready.", COLORS.success)
+            else:
+                status = (f"Ollama reachable, but {detail}", COLORS.gold)
+        self._llm_status = status
+        label.set(*status)
+
+    threading.Thread(target=work, daemon=True).start()
+```
+
+Line by line:
+- `work` is a small inner function holding the actual checks. It runs on a
+  **separate thread**, so the window keeps responding while it waits up to
+  ~2.5 s for Ollama.
+- `build_llm_client(...)` returns `None` when LLM is disabled (safety net).
+- `client.is_available()` → `(ok, detail)`. Not ok → red message that
+  includes **the exact commands to fix it**.
+- `(has_model := client.has_model())[0]` — the `:=` "walrus" operator:
+  call, save the result into `has_model`, and test its first item in one
+  move. Model present → green "connected". Server up but model missing →
+  gold "reachable, but …".
+- Finally store the verdict in `_llm_status` and put it on the label.
+  Writing a Python string from a background thread is safe here; the main
+  thread draws it on the next frame.
+- `daemon=True` — if the game closes, this background thread dies quietly
+  instead of keeping the process alive.
+
+**The proof.** New test
+`test_settings_llm_status_label_reports_ollama`: it *fakes* a dead Ollama
+(`monkeypatch.setattr(OllamaClient, "_transport", ...)`), opens the LLM
+section, waits, and asserts the label says "not reachable" and shows the
+fix commands. Fast, offline, deterministic.
+
+## 5.23 The agents' algorithms, line by line — your viva crib sheet
+
+This section answers the viva question *"what does each agent's algorithm
+actually do — show me the line"*. Every snippet below is the real code.
+Each agent gets: **its role** (why it exists in the project), the
+**algorithm in plain words**, then the **code, line by line**, and a
+one-sentence *"tell sir"* summary.
+
+A fact that frames everything: **no agent moves the snake directly.** Every
+agent only *proposes* an action; the Decision Manager pipeline
+(§5.15) runs the safety validator (§5.13) on it, and replaces it with a
+safe move if it would kill the snake. The agents below differ only in *how
+they choose what to propose*.
+
+### 5.23.1 Rule-Based — the formula agent (`agents/rule_based.py`)
+
+**Role:** the baseline "common sense" player. No search, no learning — it
+scores all 4 moves with a fixed formula and picks the best. Every other
+agent is measured against it (it actually scored highest in our benchmark,
+which is an honest finding for a 4-segment snake on a small board).
+
+**Plain words:** for each of the 4 possible moves compute a *utility
+score*; skip any move that is instantly fatal; pick the highest scorer.
+
+```python
+positives = [f for f in state.foods if f.value > 0]        # ignore trap food
+target = max(positives, key=lambda f: f.value / (1 + abs(f.pos[0] - head[0]) + abs(f.pos[1] - head[1])))
+```
+
+Line by line:
+- keep only foods worth eating (value > 0 — traps have negative value);
+- pick the food with the best **value ÷ (1 + distance)** — close foods beat
+  far foods even if they're small. `abs(...) + abs(...)` is the Manhattan
+  distance. (If the LLM strategy says "aggressive", line 56 instead picks
+  the highest-*value* food regardless of distance.)
+
+```python
+for action in ALL_ACTIONS:                        # UP, DOWN, LEFT, RIGHT
+    cell = (head[0] + ddx, head[1] + ddy)         # where would this move put my head?
+    if not state.is_inside(cell): scores[action] = -1e9   # wall → hopeless
+    if is_deadly_for(state, me, cell): scores[action] = -1e9   # body/opponent → hopeless
+```
+
+Line by line: compute the destination cell of each move; any move that hits
+a wall or a body gets −1 000 000 000 ("never unless everything else is
+worse").
+
+```python
+area = flood_fill_count(cell, view.blocked, ...)  # free cells reachable from there
+if area < me.length: scores[action] = -1e6 + area # pocket smaller than me = trap
+```
+
+Line by line: flood fill (§5.3) counts how many free cells I could still
+reach *after* this move. If that pocket is smaller than my body, the move
+leads into a dead end — score it almost as bad as death (the `+ area`
+tie-breaks toward bigger pockets when every move is tight).
+
+```python
+utility += 2.0 * (before - after)      # getting closer to target = good
+utility += 0.5 * min(1.0, area / 8.0)  # having space after = good (capped)
+if cell in trap_cells and positives: utility -= 3.0   # stepping on trap = bad
+if cell in opponent_cells: utility -= 1.5             # head-butting risk = bad
+```
+
+These four lines are the formula from the docstring: +2.0 × progress,
++0.5 × free space, −3.0 × trap, −1.5 × contested cell.
+
+```python
+best = max(scores, key=lambda a: scores[a])   # the winner
+```
+
+Pick the action with the highest score and return it as an `AgentDecision`
+(with per-move scores in `diagnostics` — that's what the UI shows).
+
+**Tell sir:** *"Rule-based scores each of the four moves with a utility
+formula — progress toward the best value-per-distance food, plus free
+space, minus trap and head-on risks — excludes fatal moves by flood-fill,
+and plays the argmax. It's the deterministic baseline the smarter agents
+must beat."*
+
+### 5.23.2 BFS — the shortest-path agent (`agents/bfs.py`)
+
+**Role:** the "pure distance" searcher. It always goes to the **nearest**
+food by step count, ignoring food values — deliberately, so the benchmark
+can show what value-aware targeting (A\*) buys over plain shortest path.
+
+**Plain words:** explore the grid in **waves** from the head until the food
+is reached; the first wave to arrive is the shortest path.
+
+```python
+queue: deque[Cell] = deque([start])     # FIFO = "first in, first out"
+parent: dict[Cell, Cell] = {start: start}
+visited: set[Cell] = {start}
+```
+
+Line by line: the wave lives in a **FIFO queue** (a list where you add at
+the back, remove from the front). `parent` remembers "which cell did I
+come from when I first reached this cell" — needed later to rebuild the
+path. `visited` stops us checking the same cell twice.
+
+```python
+while queue and nodes < max_nodes:
+    current = queue.popleft()           # take the OLDEST cell found
+    for dx, dy in DIR_VECTORS.values(): # try its 4 neighbours
+        nxt = (current[0] + dx, current[1] + dy)
+        if nxt in visited or nxt in blocked: continue   # wall/body → skip
+        visited.add(nxt); parent[nxt] = current
+        if nxt == goal:                 # reached the food!
+            path = [nxt]
+            while path[-1] != start: path.append(parent[path[-1]])
+            path.reverse()              # goal → start  becomes  start → goal
+            return path
+        queue.append(nxt)               # this neighbour joins the wave
+```
+
+Line by line: pop the oldest cell (wave order! that's what makes BFS
+find *shortest* paths first), look at its 4 neighbours, skip walls/bodies
+and seen cells, record each new cell's parent, and the moment any cell
+**is** the food, walk the `parent` chain backwards to rebuild the path and
+reverse it.
+
+The agent wrapper then adds safety on top:
+
+```python
+for food in ranked:                                  # foods sorted by distance
+    path = bfs_search(me.head, food.pos, ...)
+    area = flood_fill_count(path[-1], blocked | interior, ...)
+    if area < me.length: continue                    # bait pocket → try next food
+    chosen_path, chosen_food = path, food; break
+```
+
+Try foods nearest-first; accept a food only if the pocket at its end is
+big enough to survive in. If **no** food is safely reachable:
+
+```python
+path = bfs_search(me.head, me.tail, ..., blocked - {me.tail})
+```
+
+Classic **tail-chase survival**: path to our own tail (which is safe
+because the tail vacates each tick) and circle until the board changes.
+
+**Tell sir:** *"BFS explores in waves with a FIFO queue, guaranteeing the
+shortest path in steps to the nearest non-trap food, with a flood-fill
+pocket check against bait corridors and tail-chasing as the survival
+fallback."*
+
+### 5.23.3 A\* — the smart searcher (`agents/astar.py`)
+
+**Role:** the strongest classical agent. Like BFS it finds a path, but it
+**aims its search toward the goal** using a distance estimate, and it
+targets food by **value**, not just distance. It also re-plans **every
+tick** so it never acts on an outdated path.
+
+**Plain words:** explore cells in order of
+`f(n) = g(n) + h(n)` — *cost already walked* + *Manhattan estimate of what
+is left*. Because the estimate never overestimates on a grid, the first
+path found is optimal.
+
+```python
+open_heap: list[tuple[float, int, Cell]] = []      # the priority queue
+g_score: dict[Cell, float] = {start: 0.0}          # cheapest known cost to each cell
+came_from: dict[Cell, tuple[Cell, Action]] = {}    # how we got here (for the path)
+heapq.heappush(open_heap, (float(h0), counter, start))   # start with f = h(start)
+```
+
+Line by line: the **heap** always pops the cell with the smallest f-score
+— that's the whole trick of A\*. `g_score` remembers the best cost found
+so far to reach each cell; `came_from` remembers the move that got us
+there.
+
+```python
+while open_heap and expansions < max_expansions:
+    _, _, current = heapq.heappop(open_heap)   # most promising cell
+    if current in closed: continue             # already finished → skip
+    closed.add(current); expansions += 1
+    if current == goal: return _reconstruct(came_from, current)
+```
+
+Pop the most promising cell; if it *is* the food, rebuild the path by
+walking `came_from` backwards (`_reconstruct`, line 91).
+
+```python
+    step_cost = 1.0 + (turn_penalty if prev_dir is not None and action != prev_dir else 0.0)
+    tentative = cur_g + step_cost
+    if tentative < g_score.get(nxt, math.inf):
+        g_score[nxt] = tentative
+        came_from[nxt] = (current, action)
+        heapq.heappush(open_heap, (tentative + manhattan(nxt, goal), counter, nxt))
+```
+
+Line by line: a step costs 1, **plus a small turn penalty (0.02)** if this
+move would turn — that's why A\* paths look smooth on screen. If going to
+`nxt` this way is cheaper than any earlier way, record the new cost and
+parent, and push `nxt` with priority `new cost + Manhattan-to-goal`.
+
+Which food to chase? The scoring function:
+
+```python
+utility = w_p * (food.value / (1.0 + dist)) / 10.0     # big & near = good
+utility -= w_r * risk.get(food.risk, 0.4)              # risky food = bad
+if remaining < dist: utility -= 0.3                    # will expire before I arrive = bad
+```
+
+`w_p` grows with the LLM's `food_priority` hint and `w_r` with
+`risk_aversion × (1 − risk_tolerance)` — this is exactly **where the LLM's
+strategy (§5.14) plugs into A\***. Then (line 193–205) foods are tried
+best-score-first, each path must pass `route_is_survivable()` (same
+pocket check as BFS), and the survival fallback is again tail-chasing
+(line 213–222).
+
+**Tell sir:** *"A\* keeps a min-heap ordered by g+h with an admissible
+Manhattan heuristic, adds a turn penalty for smooth paths, targets food by
+value-over-distance adjusted by LLM strategy weights, re-plans every tick,
+and validates each candidate route with a flood-fill escape check."*
+
+### 5.23.4 RL (DQN) — the learned agent (`agents/rl_agent.py`)
+
+**Role:** the neural-network player. It doesn't search or follow rules —
+it *learned* which action pays off most from self-play (training described
+in §5.12; this is the *playing* half).
+
+**Plain words:** compress the board into 30 numbers, feed them to the
+network, get 4 Q-values ("how good is each move, from experience"), play
+the highest.
+
+```python
+obs = self.obs_builder.build(state, snake_id, view)          # 30 floats
+with torch.no_grad():                                        # playing, not learning
+    tensor = torch.from_numpy(obs.astype(np.float32)).to(self.trainer.device)
+    q = self._net(tensor.unsqueeze(0)).squeeze(0)            # 30 → 4 outputs
+q_values = {action: float(q[int(action)]) for action in ALL_ACTIONS}
+ranked = sorted(ALL_ACTIONS, key=lambda a: q_values[a], reverse=True)
+action = ranked[0]                                           # the greedy choice
+```
+
+Line by line:
+- `obs_builder.build` turns the world into the fixed 30-number observation
+  (danger flags, direction, food angles/distances — layout in §5.7);
+- `torch.no_grad()` = "no training maths, just a forward pass";
+- `unsqueeze(0)` adds the batch dimension (the network expects a *batch*
+  of observations, we give it one); the output `q` holds one score per
+  action;
+- the best action is simply the argmax of the 4 Q-values.
+
+Two honest touches: `describe()` reports *"DQN (untrained: random init)"*
+until real training happens (line 64–67), and the note at line 91 says
+untrained actions are essentially random.
+
+**Where the strategy meets the network — the risk gate** (`decision_manager.py:314`).
+When an LLM strategy asks for caution, the DQN's ranking (not just its top
+pick) is filtered:
+
+```python
+min_area = me.length * (0.8 + 0.9 * hints.survival_priority)
+min_area *= 1.0 - 0.5 * hints.risk_tolerance
+for action in ranking:                        # Q-best → Q-worst
+    report = reports.get(action)
+    if report.safe and report.free_area >= min_area:
+        gated = action; break                 # first safe-enough move wins
+```
+
+Line by line: compute the minimum free space the strategy demands (more
+`survival_priority` → bigger demand; more `risk_tolerance` → smaller);
+walk the Q-value ranking and play the first action that is safe **and**
+spacious. The network proposes; the strategy and the safety layer dispose.
+
+**Tell sir:** *"The DQN maps the 30-float observation through a
+30-128-128-4 MLP trained with Double DQN and a replay buffer; at play time
+we take the greedy action, and a strategy-driven risk gate re-ranks the
+Q-values by required escape space before the safety validator has the
+final word."*
+
+### 5.23.5 Hybrid — the three-minds agent (`decision_manager.py:353`)
+
+**Role:** the "committee" — it asks the DQN *and* A\* *and* the free-space
+calculation, converts each answer to a 0–1 score, and blends them with
+configurable weights. The weights themselves are modulated by the LLM's
+strategy hints, which is why this mode is the flagship of the
+"LLM-enhanced" title.
+
+```python
+rl_decision = self.rl_agent.decide(...)       # mind 1: learned values
+astar_decision = self.astar_agent.decide(...) # mind 2: planned path
+w_path *= 0.4 + 1.2 * hints.food_priority     # LLM: hungry → trust the path more
+w_space *= 0.5 + 1.0 * hints.survival_priority # LLM: scared → trust space more
+w_rl, w_path, w_space = w_rl / total, w_path / total, w_space / total   # normalize to sum 1
+```
+
+Line by line: run both agents; scale the path/space weights by the LLM's
+appetites; normalize so the three weights always sum to 1 (a fair mix).
+
+```python
+def q_norm(a): ...  (q[a] - lo) / (hi - lo)    # squash Q-values to 0..1
+path_term  = 1.0 - dist(a) / d_max             # 1 = moves closest to target
+space_term = reports[a].free_area / area_max   # 1 = most breathing room
+scores[a] = w_rl * q_norm(a) + w_path * path_term + w_space * space_term
+best = max(scores, key=lambda a: scores[a])
+```
+
+Line by line: each ingredient is normalized to 0–1 (otherwise the raw
+Q-value, which can be any size, would drown the others), then the weighted
+sum picks the winner. All of this happens **only over `safe` actions** —
+the safety filter ran before the blending.
+
+**Tell sir:** *"Hybrid scores every safe action as a weighted blend of
+normalized DQN Q-values, progress toward A\*'s chosen target, and free
+space after the move; the LLM strategy scales the weights each decision,
+so one brain sets the priorities while the three specialists vote."*
+
+### 5.23.6 The LLM modes (`llm_astar`, `llm_rl`) — strategy, not moves
+
+There is no separate "LLM algorithm" for moving — by design. Every few
+seconds (config: `min_interval_seconds`) the `StrategyWorker` thread
+(§5.14) sends a JSON snapshot of the board to the local LLM and gets back a
+**posture**: a strategy name, three weights (`food_priority`,
+`risk_tolerance`, `survival_priority`), and an optional food to pin. Those
+weights flow straight into the formulas you saw above: A\*'s `score_food`
+(w_p, w_r), the risk gate's `min_area`, the hybrid's weight scaling. The
+LLM is the **general**; A\*/DQN/hybrid are the **soldiers**; the safety
+validator is the **law**. If the general is silent (no Ollama, timeout,
+bad JSON), `fallback_strategy()` supplies the same shape of hints — so the
+soldiers never stop marching.
+
+# 6. Every command, explained
+
+Run all of these from the project folder `~/snake-game`.
+
+### One-time setup
+
+```bash
+./setup_linux.sh
+```
+*What it does:* creates `.venv` (an isolated Python), installs CPU-only
+PyTorch from PyTorch's own index (small download), then the rest of
+`requirements.txt`. You only run this once (or after changing requirements).
+
+### Moving the project to Windows (one command)
+
+To play on a Windows computer:
+
+1. **Install Python once** (only if that PC doesn't have it): download from
+   [python.org/downloads](https://www.python.org/downloads/) and in the
+   installer **tick "Add python.exe to PATH"**. That tick matters.
+2. **Copy the project folder** to the Windows PC (USB drive, Google Drive,
+   anything). Tip: you do *not* need to copy `.venv/` (it's Linux-only and
+   will be re-created) or `data/` — but do keep `models/` if you want your
+   trained checkpoint.
+3. **Double-click `run_windows.bat`** (or run it in a terminal). That is
+   the whole thing. On the **first run it**:
+   - finds Python,
+   - creates the `.venv` virtual environment,
+   - downloads **all** requirements in one go: CPU PyTorch → pygame-ce →
+     numpy → matplotlib,
+   - then starts the game.
+   Every later run skips the download and starts instantly.
+
+Optional LLM on Windows: install Ollama from <https://ollama.com> (plain
+installer), then `ollama pull qwen3:4b` in Command Prompt. The game is
+fully playable without it.
+
+*Honest note (also printed inside the scripts):* these Windows scripts were
+written on Linux and never executed on a real Windows machine. If anything
+fails, read the error message — the script prints exactly which step to
+retry — and see `docs/WINDOWS_SETUP.md` for the manual commands.
+`setup_windows.ps1` does the same install for PowerShell users.
+
+### Everyday launch
+
+```bash
+./run_linux.sh                    # or directly:
+.venv/bin/python main.py
+```
+*Meaning:* run the program with the project's private Python. The window
+opens on the Menu. Arena controls (from `ui/arena.py`): **arrows / WASD**
+move, **Space** pause, **R** restart, **Enter** continue after game over,
+**+ / −** speed up / slow down, **1 / 2** toggle AI overlays, **Esc** back.
+
+### Health check
+
+```bash
+.venv/bin/python main.py --check
+```
+*Meaning:* no window; verifies paths, all libraries, config + food catalog,
+runs a 30-tick engine smoke test, builds the DQN, probes Ollama. Aim for
+**ALL CHECKS PASSED** (exit code 0). Run this first whenever anything feels
+broken.
+
+### Training the RL agent
+
+```bash
+.venv/bin/python main.py --train 400
+```
+*Meaning:* train the DQN headless for 400 episodes (each episode = the snake
+plays until it dies or 1200 steps). Prints progress every ~5% (score, total
+reward, ε, loss), autosaves every 50 episodes, runs a greedy evaluation at
+the end, saves `models/dqn_default.pt`, writes
+`data/training/training_curves.png`.
+
+*Facts to know:*
+- It **resumes**: re-running continues from the saved checkpoint. Delete
+  `models/dqn_default.pt` to start over.
+- 40 episodes ≈ seconds (functional test). Real skill needs **thousands**.
+- ε (epsilon) is the "explore randomly" probability: starts at 1.0 (pure
+  random), decays to 0.05 by 25 000 steps.
+
+Equivalent form: `.venv/bin/python scripts/train.py --episodes 400`.
+
+### Benchmarking agents
+
+```bash
+.venv/bin/python main.py --benchmark 20
+```
+*Meaning:* every agent (all 7) plays 20 headless episodes with **identical
+seeds**, then each gets a summary (mean/median/std score, survival, traps/1k
+ticks, ms per decision). Results are saved to
+`data/benchmarks/cli-<timestamp>-<id>/` as `results.json`, two CSVs, and
+three PNG charts.
+
+Subsets:
+
+```bash
+.venv/bin/python main.py --benchmark 10 --agents rule_based,astar
+```
+*Meaning:* only those two agents; agent names must be from:
+`rule_based, astar, bfs, rl, llm_astar, llm_rl, hybrid`.
+
+### AI-vs-AI tournament
+
+```bash
+.venv/bin/python -m scripts.benchmark --episodes 1 --agents rule_based,astar --tournament
+```
+*Meaning:* `-m scripts.benchmark` runs that script as a program;
+`--tournament` adds a round-robin of duels (2 rounds per pair) and saves a
+tournament file with wins/win-rates/draws, printed as a table.
+
+### Testing
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+```
+*Meaning:* run all 104 automated tests quietly (`-q` = compact output).
+Expected last line: **`104 passed`** (~6 s). No internet, no window, no
+Ollama needed. Useful variants:
+
+```bash
+.venv/bin/python -m pytest tests/test_safety.py -v       # one file, verbose
+.venv/bin/python -m pytest tests/ -k checkpoint          # tests with 'checkpoint' in the name
+```
+
+### Forcing the LLM off (and on)
+
+```bash
+.venv/bin/python main.py --no-llm     # this run: no LLM at all
+```
+*Meaning:* same game, LLM planner disabled for this launch only. To enable
+the LLM: start Ollama (`ollama serve`), pull a model (`ollama pull
+qwen3:4b`), then turn it on in **Settings → LLM Planner → enabled → Save**
+(or set `"enabled": true` in `config/default.json`). If the server is down,
+agents just use the fallback strategy — nothing breaks.
+
+### Using the LLM planner for real (full setup)
+
+The LLM runs **locally** through [Ollama](https://ollama.com) — nothing is
+sent to the internet at play time. On Arch Linux:
+
+```bash
+sudo pacman -S ollama            # 1. install Ollama
+systemctl enable --now ollama    # 2. start it as a service (runs at boot)
+ollama pull qwen3:4b             # 3. download the model (~2.6 GB, once)
+ollama list                      # 4. confirm qwen3:4b is there
+```
+
+No systemd preference? Step 2 can just be `ollama serve` in any terminal
+(keep it open while playing). To use a different model, pull it and put its
+tag in **Settings → LLM Planner → model**. Any instruct model that Ollama
+serves works; smaller ones answer faster.
+
+Then check everything is wired up:
+
+```bash
+.venv/bin/python scripts/check_environment.py
+# LLM planner (optional)
+#   [OK  ] Ollama - qwen3:4b (0.1s)
+```
+
+Or just open the game: **Settings → LLM Planner** now shows a live status
+line at the bottom of the section — *green "Ollama connected -- model
+qwen3:4b ready"*, or a red line telling you exactly what to run.
+
+To actually see the LLM play, pick an LLM-using agent:
+
+| Agent | What the LLM does |
+|---|---|
+| `llm_astar` | LLM suggests the *strategy* (which food, how aggressive); A* computes the path |
+| `llm_rl` | LLM strategy hints steer the trained DQN |
+| `hybrid` | Weighted blend of RL, A* and free-space scores, LLM hints on top |
+
+Choose it in **Play → mode select** or as the default in **Settings →
+Agents**. During a game, press `1` / `2` to open an AI panel: when the LLM
+answers you'll see `llm: ok 350 ms`; if it can't, you'll see the fallback
+reason instead — the game itself never waits or freezes on the LLM.
+
+### Where everything lands
+
+| You ran | You get |
+|---|---|
+| `--train` | `models/dqn_default.pt`, `data/training/training_curves.png` |
+| `--benchmark` | `data/benchmarks/cli-…/` (results.json, 2×CSV, 3×PNG) |
+| `--tournament` | `data/benchmarks/tournament-…/results.json` |
+| playing games | `data/history/games.jsonl` (Statistics screen reads it) |
+| anything | `data/logs/app.log` |
+
+---
+
+# 7. The tests
+
+`tests/` — 104 tests, all offline. Why they matter for your defence: they
+prove the claims, and during development they caught **real bugs** (the
+food-stacking bug, a wrong pygame API, path-resolution, three UI import
+errors, the config-overwriting test of §5.22 story 3, and the four
+play-testing bugs of §5.22).
+
+| File | Covers |
+|---|---|
+| `conftest.py` | shared helpers: `make_engine(...)`, `make_env(...)`, a default config |
+| `test_game.py` | movement, gradual growth, reversal ignored, wall/self deaths, head-on draws, tail-vacating, score = Σ food values, determinism, reset |
+| `test_food.py` | catalog loads 5 types, probabilities normalized, weighted_choice, spawn/expire/refill, full-board skip, FoodStats |
+| `test_pathfinding.py` | A\* optimal + detour + unreachable, BFS parity, flood-fill survivability |
+| `test_safety.py` | each rejection reason, dead-end geometry, `select_safe_action` override, honest `no_safe_action` |
+| `test_rl.py` | network shapes, replay ring behaviour, each reward component, training runs, **deterministic greedy eval**, checkpoint round-trip, CheckpointError |
+| `test_llm.py` | a **FakeTransport** (programmable fake HTTP): availability, JSON mode, `<think>` stripping, retries, strict validation rejections, fallback determinism, snapshot hash |
+| `test_decision_manager.py` | all 7 modes decide + log; LLM modes use fallback with `llm_calls == 0`; safety overrides a stubborn policy; the exact risk-gate formula |
+| `test_benchmark.py` | structure, **identical seeds across agents**, honest `llm_available: false`, match fields, tick cap, cancellation |
+| `test_persistence.py` | atomic round-trip, corrupt quarantine, damaged-JSONL skip, config clamping/recovery |
+| `test_integration.py` | full episodes through every mode; observation shape; benchmark → saved artifacts → reload identical; history receives played games |
+| `test_ui_headless.py` | every screen constructs, updates, draws, and takes an event — with SDL's **dummy** video driver (`SDL_VIDEODRIVER=dummy`), i.e. no monitor needed. Also the **regression tests** from §5.22: game-over buttons survive clicks across frames, all four arrows turn the snake, Settings saves go to a temp file (not your real config), and the LLM status label reports a dead Ollama honestly. |
+
+**How to add a test:** create `tests/test_whatever.py`, import from
+`.conftest` (`from .conftest import make_engine`), write functions named
+`test_*` using plain `assert`. Run pytest. That's the whole pattern.
+
+---
+
+# 8. How to change things (recipes)
+
+All recipes assume you re-run the tests afterwards.
+
+**Change food values / chances** — edit `config/foods.json` (values,
+`probability`, `lifetime_seconds`, `growth`, `color`). Probabilities are
+normalized automatically. No code changes.
+
+**Change board size / speed / food count** — `config/default.json` →
+`board.width/height`, `game.moves_per_second`, `game.max_foods`
+(the UI Settings screen edits the same file).
+
+**Change RL hyperparameters** — `config/default.json` → `rl`:
+`hidden_sizes`, `gamma`, `learning_rate`, `eps_decay_steps`,
+`double_dqn`, and every reward weight under `rl.reward`. Then retrain.
+
+**Add a new agent** (the full recipe):
+1. Create `src/snake_arena/agents/my_agent.py`:
+   ```python
+   from .base import AgentDecision, BaseAgent, StrategyHints
+   class MyAgent(BaseAgent):
+       name = "my_agent"
+       def decide(self, state, snake_id, view=None, hints=None):
+           # look at state/view, choose an Action
+           return AgentDecision(agent=self.name, action=chosen, notes=["why"])
+   ```
+2. In `agents/decision_manager.py`: add `self.my_agent = MyAgent()` in
+   `__init__`, and a branch in `_policy()` for a new mode name
+   `"my_agent"`.
+3. Register the name in `agents/decision_manager.py`'s `describe()` map and
+   in `evaluation/benchmark.py` (`AGENT_LABELS`, maybe `LLM_MODES`), plus
+   `config/default.json` → `benchmark.agents` if you want it by default.
+4. Test it: `pytest`, then
+   `python main.py --benchmark 2 --agents my_agent`.
+
+**Make the LLM behave differently** — edit `SYSTEM_PROMPT` and
+`fallback_strategy()` in `llm/strategist.py`, and/or the model in Settings
+(`llm.model`). The schema in `llm/schemas.py` defines what answers are legal.
+
+**Change colours / fonts** — `ui/theme.py` (`COLORS`, `Fonts`).
+
+**Change the neural network** — `rl/network.py` (layer sizes come from
+`rl.hidden_sizes` in config). If you change the **observation** (the 30
+floats), you **must** bump `OBS_SIZE` in `game/environment.py` and retrain —
+old checkpoints will be rejected by `load_checkpoint` (by design: it checks
+`obs_size`).
+
+**Change win/lose rules** — `game/engine.py` step 8 (termination checks).
+
+**Tune difficulty for humans** — `game.moves_per_second`, `game.max_foods`,
+trap probability in `config/foods.json`.
+
+---
+
+# 9. Glossary & likely questions
+
+**Glossary**
+
+- **A\*** — best-first pathfinding: explores cells ordered by
+  `cost-so-far + estimated-distance-left`; optimal when the estimate never
+  overestimates (Manhattan distance on a grid).
+- **BFS** — breadth-first search: explores in waves; first path found is
+  shortest (in steps).
+- **DQN** — Deep Q-Network: a neural network that learns action values
+  Q(s,a) from stored experience (Mnih et al., 2015).
+- **Replay buffer** — memory of past moves, sampled randomly to train.
+- **ε-greedy** — explore randomly with probability ε, else act greedily.
+- **Target network** — a frozen copy of the Q-network that stabilizes
+  training targets; synced every 1000 steps.
+- **Double DQN** — decouple "pick best action" (online net) from "value it"
+  (target net) to reduce overestimation.
+- **Reward shaping** — small intermediate rewards (distance progress) to
+  guide learning without changing the optimal policy.
+- **Flood fill** — count all cells reachable from a point; used for
+  dead-end detection.
+- **Tail-awareness** — treating a vacating tail cell as free.
+- **Atomic save** — write to a temp file, then rename: a crash never
+  corrupts the previous file.
+- **Posture/hints** — the LLM's output: strategy parameters, never moves.
+- **Fallback strategy** — the deterministic stand-in when the LLM is
+  missing/slow/wrong.
+- **Truthy / falsy** — whether Python treats a value as "something" or
+  "nothing" in an `if`/`or`. `0`, `""`, `None` are falsy; almost everything
+  else is truthy. The UP-arrow bug (§5.22 story 2) came from `0` being falsy.
+- **Regression test** — a test written *after* fixing a bug, that fails on
+  the old broken code and passes on the fixed code — so the bug can never
+  sneak back in silently.
+- **Thread** — a second line of execution inside one program. Used so the
+  LLM call and training never freeze the game window.
+- **monkeypatch / tmp_path** — pytest tools: temporarily replace a function
+  during a test (auto-restored), and a private temp folder per test. Used in
+  §5.22 story 3 to stop tests touching your real config.
+
+**Questions you may be asked, with short true answers**
+
+- *"How does the LLM control the snake?"* — It doesn't, on purpose. Every
+  few seconds it receives a JSON snapshot and returns a posture (strategy
+  name + three 0–1 weights + optional food target). The classical/RL
+  policies consume those weights, and the safety validator still overrides
+  anything unsafe. If the LLM is absent/slow/wrong, a deterministic
+  fallback supplies the same shape of hints.
+- *"How do you compare agents fairly?"* — Identical per-index seeds: agent
+  A's episode k and agent B's episode k start from the same board and food.
+  Differences are then purely policy. A test asserts the seed lists match.
+- *"Is your RL agent good?"* — The shipped checkpoint is trained for 40
+  episodes, which is a functional check only; the tooling labels it
+  untrained/undertrained everywhere, and longer training is one command.
+- *"How do you know the safety checker works?"* — Unit tests place snakes in
+  geometrically impossible situations and assert each rejection reason; one
+  test forces the policy to propose a fatal move and asserts the pipeline
+  overrides it.
+- *"What happens if Ollama crashes mid-game?"* — Calls time out, retries
+  happen inside limits, then the fallback strategy takes over; counters
+  (`llm_failures`) record it; the game loop never blocks on the LLM (it's
+  on a background thread with a cached latest result).
+- *"Why pygame-ce?"* — Classic pygame has no package for Python 3.14 and its
+  source build here had a broken font module; pygame-ce is the maintained
+  drop-in replacement with official wheels.
+- *"What was the hardest bug?"* — Two candidates, both good stories. (1)
+  Food could spawn on top of existing food because the spawn check ignored
+  occupied food cells; a test caught it and the fix was one parameter:
+  `occupied_cells(include_food=True)`. (2) The UP arrow: `Action.UP == 0`
+  and `0` is falsy in Python, so `x or default` silently discarded UP
+  presses — the fix was comparing with `None` explicitly (§5.22 story 2).
+- *"Did anything break after you finished?"* — Yes, four things, and each is
+  documented with its line-by-line fix and a regression test (§5.22). The
+  most interesting: the test suite itself was silently overwriting the
+  user's config file — a lesson that tests must never write to real user
+  data (redirect persistence into `tmp_path`).
+- *"Why does the game never freeze waiting for the LLM?"* — Three layers:
+  the strategy worker runs on a background thread and the game reads only
+  the latest cached hints; calls have hard timeouts with limited retries;
+  and the safety validator + fallback strategy guarantee a decision every
+  tick even if the LLM never answers.
+
+---
+
+*End of guide. Related docs: [ARCHITECTURE.md](ARCHITECTURE.md) (structure),
+[AI_ALGORITHMS.md](AI_ALGORITHMS.md) (agents), [RL_TRAINING.md](RL_TRAINING.md)
+(training), [EXPERIMENTS.md](EXPERIMENTS.md) (benchmarks),
+[REPORT.md](REPORT.md) (academic write-up).*
